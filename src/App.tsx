@@ -4,8 +4,6 @@ import {
   saveSongs,
   getSelectedSongId,
   setSelectedSongId,
-  getStoredApiKey,
-  setStoredApiKey,
   DEFAULT_SONGS
 } from './services/storageService';
 import { Song } from './types';

@@ -12,9 +12,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Middleware for JSON and URL-encoded bodies with large payload capacity for images
-app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+// Middleware for JSON and URL-encoded bodies with large payload capacity for PDFs and photos
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Server-side initialization of Gemini client with User-Agent telemetry
 const ai = new GoogleGenAI({
@@ -27,7 +27,11 @@ const ai = new GoogleGenAI({
 });
 
 export const GEMINI_PROMPT =
-  "Analise a imagem desta partitura musical. Converta estritamente todas as notas, compassos e acidentes para o formato 'ABC Notation' limpo. Ignore letras e retorne APENAS o código ABC bruto, sem formatações de markdown ou explicações.";
+  "Você é um especialista em transcrição musical de coral. Analise cuidadosamente este documento ou imagem de partitura (foto ou arquivo PDF). " +
+  "Converta estritamente todas as notas, compassos, armaduras de clave, acidentes e divisões de vozes para o formato 'ABC Notation' limpo e perfeitamente executável. " +
+  "Se a partitura tiver divisão para coral (Soprano, Contralto, Tenor, Baixo), organize em vozes separadas usando '%%score (S A) | (T B)' com 'V:S clef=treble name=\"Soprano\"', 'V:A clef=treble name=\"Contralto\"', 'V:T clef=bass name=\"Tenor\"' e 'V:B clef=bass name=\"Baixo\"'. " +
+  "Se houver letra sob as notas, transcreva a letra com 'w:'. " +
+  "Retorne APENAS o código ABC puro, sem formatações de markdown ou explicações.";
 
 /**
  * Sanitizes ABC code from model response
@@ -35,7 +39,7 @@ export const GEMINI_PROMPT =
 function sanitizeAbc(rawText: string, fallbackTitle?: string): string {
   let cleaned = (rawText || '').trim();
 
-  // Strip markdown code fences
+  // Strip markdown code fences like ```abc ... ``` or ``` ... ```
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```[a-zA-Z0-9_-]*\n?/, '');
     cleaned = cleaned.replace(/```$/, '');
@@ -73,13 +77,13 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Sheet music conversion endpoint
+// Sheet music conversion endpoint (Supports Photos & PDFs)
 app.post('/api/convert-sheet', async (req, res) => {
   try {
     const { imageBase64, title } = req.body;
 
     if (!imageBase64) {
-      return res.status(400).json({ error: 'Nenhuma imagem foi fornecida.' });
+      return res.status(400).json({ error: 'Nenhum arquivo ou imagem foi fornecido.' });
     }
 
     if (!process.env.GEMINI_API_KEY) {
@@ -88,7 +92,7 @@ app.post('/api/convert-sheet', async (req, res) => {
       });
     }
 
-    // Extract mime type and raw base64
+    // Extract mime type and raw base64 data
     let mimeType = 'image/jpeg';
     let base64Data = imageBase64;
 
@@ -96,9 +100,12 @@ app.post('/api/convert-sheet', async (req, res) => {
       const parts = imageBase64.split(';base64,');
       mimeType = parts[0].replace('data:', '') || 'image/jpeg';
       base64Data = parts[1];
+    } else if (imageBase64.startsWith('JVBERi0')) {
+      // PDF magic bytes in base64
+      mimeType = 'application/pdf';
     }
 
-    const imagePart = {
+    const documentPart = {
       inlineData: {
         mimeType: mimeType,
         data: base64Data,
@@ -109,7 +116,7 @@ app.post('/api/convert-sheet', async (req, res) => {
       text: GEMINI_PROMPT,
     };
 
-    // Candidates in order of speed and sheet music vision proficiency
+    // Candidate models proficient in vision and multi-page document understanding
     const modelsToTry = [
       'gemini-2.5-flash',
       'gemini-3.8-flash',
@@ -124,7 +131,7 @@ app.post('/api/convert-sheet', async (req, res) => {
         const response = await ai.models.generateContent({
           model: model,
           contents: {
-            parts: [imagePart, textPart],
+            parts: [documentPart, textPart],
           },
         });
 
@@ -135,12 +142,11 @@ app.post('/api/convert-sheet', async (req, res) => {
       } catch (err: any) {
         lastError = err;
         console.warn(`Model ${model} failed, trying next fallback if available:`, err?.message || err);
-        // Continue to fallback
       }
     }
 
     if (!generatedText.trim()) {
-      const msg = lastError?.message || 'O modelo não retornou notação para esta partitura.';
+      const msg = lastError?.message || 'O modelo não conseguiu extrair a notação musical deste arquivo.';
       return res.status(502).json({ error: msg });
     }
 
@@ -150,6 +156,7 @@ app.post('/api/convert-sheet', async (req, res) => {
       abc: cleanAbc,
       raw: generatedText,
       title: title || 'Partitura do Coral',
+      mimeType: mimeType,
     });
   } catch (error: any) {
     console.error('Sheet conversion error on server:', error);
