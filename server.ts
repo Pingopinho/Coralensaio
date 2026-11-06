@@ -116,9 +116,8 @@ app.post('/api/convert-sheet', async (req, res) => {
       text: GEMINI_PROMPT,
     };
 
-    // Candidate models proficient in vision and multi-page document understanding
+    // Active Gemini models for vision and PDF document transcription
     const modelsToTry = [
-      'gemini-2.5-flash',
       'gemini-3.8-flash',
       'gemini-flash-latest',
     ];

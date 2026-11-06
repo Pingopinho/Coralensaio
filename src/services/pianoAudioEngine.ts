@@ -3,6 +3,41 @@
  * Self-contained, zero-dependency, works 100% reliably in any browser/mobile.
  */
 
+export interface PitchInfo {
+  name: string;
+  ptName: string;
+  octave: number;
+  color: string;
+}
+
+// Chromesthesia musical pitch colors (Dó = Vermelho, Ré = Laranja, Mi = Amarelo, etc.)
+export const PITCH_COLORS: { [key: number]: { name: string; ptName: string; color: string } } = {
+  0: { name: 'C', ptName: 'Dó', color: '#ef4444' },      // Red
+  1: { name: 'C#', ptName: 'Dó#', color: '#f43f5e' },    // Rose
+  2: { name: 'D', ptName: 'Ré', color: '#f97316' },      // Orange
+  3: { name: 'D#', ptName: 'Ré#', color: '#fb923c' },    // Light Orange
+  4: { name: 'E', ptName: 'Mi', color: '#eab308' },      // Amber / Gold
+  5: { name: 'F', ptName: 'Fá', color: '#10b981' },      // Green
+  6: { name: 'F#', ptName: 'Fá#', color: '#14b8a6' },    // Teal
+  7: { name: 'G', ptName: 'Sol', color: '#06b6d4' },     // Cyan
+  8: { name: 'G#', ptName: 'Sol#', color: '#0284c7' },   // Sky Blue
+  9: { name: 'A', ptName: 'Lá', color: '#3b82f6' },      // Indigo Blue
+  10: { name: 'A#', ptName: 'Lá#', color: '#6366f1' },   // Violet
+  11: { name: 'B', ptName: 'Si', color: '#a855f7' },     // Purple
+};
+
+export function getPitchInfo(midiPitch: number): PitchInfo {
+  const normalized = ((midiPitch % 12) + 12) % 12;
+  const octave = Math.floor(midiPitch / 12) - 1;
+  const info = PITCH_COLORS[normalized] || { name: 'C', ptName: 'Dó', color: '#10b981' };
+  return {
+    name: info.name,
+    ptName: info.ptName,
+    octave,
+    color: info.color,
+  };
+}
+
 class PianoAudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -57,39 +92,34 @@ class PianoAudioEngine {
       const now = startTime !== undefined && startTime >= ctx.currentTime ? startTime : ctx.currentTime;
       const freq = this.midiToFreq(midiPitch);
 
-      // Acoustic piano string model:
-      // Oscillator 1: Fundamental frequency (triangle for warm string body)
+      // Acoustic piano string harmonics
       const osc1 = ctx.createOscillator();
       osc1.type = 'triangle';
       osc1.frequency.setValueAtTime(freq, now);
 
-      // Oscillator 2: First overtone (sine at 2x freq for clarity and brightness)
       const osc2 = ctx.createOscillator();
       osc2.type = 'sine';
       osc2.frequency.setValueAtTime(freq * 2, now);
 
-      // Oscillator 3: Soft sub-harmonic or fifth harmonic for richness
       const osc3 = ctx.createOscillator();
       osc3.type = 'sine';
       osc3.frequency.setValueAtTime(freq * 3, now);
 
-      // Note envelope gain
       const noteGain = ctx.createGain();
-      const peakGain = Math.min(1.0, Math.max(0.1, velocity * 0.9));
+      const peakGain = Math.min(1.0, Math.max(0.05, velocity * 0.9));
 
-      // Attack: felt hammer strike (quick ramp 0.005s)
+      // Attack: felt hammer strike (0.005s)
       noteGain.gain.setValueAtTime(0.0001, now);
       noteGain.gain.linearRampToValueAtTime(peakGain, now + 0.005);
 
-      // Initial decay: sharp drop from hammer transient
+      // Initial decay
       noteGain.gain.exponentialRampToValueAtTime(peakGain * 0.45, now + 0.06);
 
       // Sustain and string ring-down
-      const ringDuration = Math.max(duration * 1.5, 0.5);
+      const ringDuration = Math.max(duration * 1.5, 0.45);
       const noteEndTime = now + ringDuration;
       noteGain.gain.exponentialRampToValueAtTime(0.0001, noteEndTime);
 
-      // Connect sub-oscillators
       osc1.connect(noteGain);
 
       const gain2 = ctx.createGain();
@@ -115,7 +145,6 @@ class PianoAudioEngine {
       const voice = { oscs: [osc1, osc2, osc3], gain: noteGain };
       this.activeVoices.push(voice);
 
-      // Garbage collect ended voices
       setTimeout(() => {
         const idx = this.activeVoices.indexOf(voice);
         if (idx !== -1) this.activeVoices.splice(idx, 1);
@@ -153,6 +182,9 @@ class PianoAudioEngine {
     }
   }
 
+  /**
+   * Immediately cuts and disconnects any currently sounding notes (used on Pause)
+   */
   public stopAllNotes() {
     try {
       const now = this.ctx ? this.ctx.currentTime : 0;
@@ -160,9 +192,11 @@ class PianoAudioEngine {
         try {
           v.gain.gain.cancelScheduledValues(now);
           v.gain.gain.setValueAtTime(0.0001, now);
+          v.gain.disconnect();
           v.oscs.forEach((osc) => {
             try {
-              osc.stop(now + 0.02);
+              osc.stop(now + 0.01);
+              osc.disconnect();
             } catch {}
           });
         } catch {}

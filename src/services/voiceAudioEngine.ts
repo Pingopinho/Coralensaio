@@ -161,9 +161,12 @@ export class VoiceAudioEngine {
           v.gains.forEach((g) => {
             g.gain.cancelScheduledValues(now);
             g.gain.setValueAtTime(0.0001, now);
+            g.disconnect();
           });
-          v.osc.stop(now + 0.02);
-          v.lfo.stop(now + 0.02);
+          v.osc.stop(now + 0.01);
+          v.lfo.stop(now + 0.01);
+          v.osc.disconnect();
+          v.lfo.disconnect();
         } catch {}
       });
       this.activeVoices = [];

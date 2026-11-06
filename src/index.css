@@ -84,3 +84,15 @@
   font-weight: 700 !important;
   fill: #059669 !important;
 }
+
+/* Real-time pitch-colored note styling */
+.abcjs-colored-note {
+  transition: fill 0.08s ease, stroke 0.08s ease;
+}
+
+.abcjs-colored-note path,
+.abcjs-colored-note ellipse {
+  fill: inherit !important;
+  stroke: inherit !important;
+}
+
