@@ -1,0 +1,6 @@
+{
+  "name": "CoralEnsaio - Partituras e Player de Coral",
+  "description": "Aplicação web para gerenciar e ensaiar músicas de coral com conversão de partituras via IA Gemini e player interativo de piano.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
