@@ -56,13 +56,16 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [totalDuration, setTotalDuration] = useState<number>(0);
-  const [bpmPercent, setBpmPercent] = useState<number>(100);
+
+  // Metronome and dynamic BPM tempo controls
+  const [currentBpm, setCurrentBpm] = useState<number>(100);
   const [metronomeOn, setMetronomeOn] = useState<boolean>(false);
+  const [activeBeat, setActiveBeat] = useState<number>(1);
   const [volume, setVolume] = useState<number>(90);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
-  // Sound timbre: Piano, Human Singing Voice, or Combined
-  const [soundMode, setSoundMode] = useState<SoundMode>('piano');
+  // Sound timbre: Piano, Human Singing Voice, or Combined (default: both)
+  const [soundMode, setSoundMode] = useState<SoundMode>('both');
 
   // Selected voice for solo or focus
   const [selectedVoice, setSelectedVoice] = useState<'all' | VocalPart>('all');
@@ -70,7 +73,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
   // Active notes currently sounding (with pitch colors & minute)
   const [activeNotesDisplay, setActiveNotesDisplay] = useState<ActiveNoteDisplay[]>([]);
-  const [statusMessage, setStatusMessage] = useState<string>('Piano pronto para tocar');
+  const [statusMessage, setStatusMessage] = useState<string>('Piano e Voz Humana prontos para ensaio');
 
   // State refs for low-latency lookahead scheduling
   const isPlayingRef = useRef<boolean>(false);
@@ -80,9 +83,10 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   const lastBeatClickedRef = useRef<number>(-1);
   const selectedVoiceRef = useRef<'all' | VocalPart>('all');
   const voiceFocusModeRef = useRef<VoiceFocusMode>('solo');
-  const soundModeRef = useRef<SoundMode>('piano');
+  const soundModeRef = useRef<SoundMode>('both');
   const transpositionRef = useRef<number>(0);
-  const bpmPercentRef = useRef<number>(100);
+  const currentBpmRef = useRef<number>(100);
+  const metronomeOnRef = useRef<boolean>(false);
 
   // Sync refs with state
   useEffect(() => {
@@ -102,8 +106,12 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
   }, [transposition]);
 
   useEffect(() => {
-    bpmPercentRef.current = bpmPercent;
-  }, [bpmPercent]);
+    currentBpmRef.current = currentBpm;
+  }, [currentBpm]);
+
+  useEffect(() => {
+    metronomeOnRef.current = metronomeOn;
+  }, [metronomeOn]);
 
   // Parse notes and SATB voice separation
   const scoreData = useMemo(() => {
@@ -273,14 +281,13 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     }
   }, [visualObj, abc]);
 
-  const effectiveTotalDuration = useMemo(() => {
-    if (scoreData.totalSec === 0) return 0;
-    return scoreData.totalSec * (100 / bpmPercent);
-  }, [scoreData.totalSec, bpmPercent]);
-
+  // Sync base BPM from score when loaded
   useEffect(() => {
-    setTotalDuration(effectiveTotalDuration);
-  }, [effectiveTotalDuration]);
+    if (scoreData.bpm && scoreData.bpm > 0) {
+      setCurrentBpm(scoreData.bpm);
+    }
+    setTotalDuration(scoreData.totalSec);
+  }, [scoreData.bpm, scoreData.totalSec]);
 
   // Reset when a completely new song is opened
   useEffect(() => {
@@ -299,15 +306,14 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
   // Color notes according to pitch and minute played
   const updateNoteColoringAndDisplay = (posSec: number) => {
-    const speedRatio = 100 / bpmPercentRef.current;
     const currentActive: ActiveNoteDisplay[] = [];
 
-    // Find notes sounding at posSec
+    // Find notes sounding at posSec in score time
     scoreData.notes.forEach((n) => {
-      const noteStart = n.startTime * speedRatio;
-      const noteEnd = noteStart + n.duration * speedRatio;
+      const noteStart = n.startTime;
+      const noteEnd = noteStart + n.duration;
 
-      if (posSec >= noteStart - 0.04 && posSec <= noteEnd + 0.04) {
+      if (posSec >= noteStart - 0.05 && posSec <= noteEnd + 0.05) {
         const curSelected = selectedVoiceRef.current;
         const curFocus = voiceFocusModeRef.current;
 
@@ -371,11 +377,13 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     pausePlayback();
     currentTimeRef.current = 0;
     lastSchedulePosRef.current = 0;
+    lastBeatClickedRef.current = -1;
+    setActiveBeat(1);
     setCurrentTime(0);
     setStatusMessage('Pronto para tocar');
   };
 
-  // Start or resume playback using lookahead scheduling
+  // Start or resume playback using lookahead scheduling in score time
   const startPlayback = (startPosSec: number) => {
     pianoEngine.resume();
     voiceEngine.resume();
@@ -385,7 +393,6 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
     voiceEngine.stopAll();
 
     const ctx = pianoEngine.initContext();
-    const ctxStartTime = ctx.currentTime;
 
     isPlayingRef.current = true;
     setIsPlaying(true);
@@ -401,9 +408,15 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           selectedVoiceRef.current.slice(1) +
           (voiceFocusModeRef.current === 'solo' ? ' (Solo)' : ' (Destaque)');
 
-    setStatusMessage(`Tocando ${voiceName}...`);
+    const timbreName =
+      soundModeRef.current === 'both'
+        ? 'Piano + Voz Cantada'
+        : soundModeRef.current === 'voice'
+        ? 'Voz Humana Cantada'
+        : 'Piano';
 
-    // High-precision lookahead scheduler (runs every animation frame)
+    setStatusMessage(`Tocando ${voiceName} com ${timbreName}...`);
+
     let lastClockTime = ctx.currentTime;
 
     const schedulerLoop = () => {
@@ -413,41 +426,42 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       const deltaClock = nowClock - lastClockTime;
       lastClockTime = nowClock;
 
-      // Advance song playhead position
-      currentTimeRef.current += deltaClock;
+      const baseBpm = scoreData.bpm || 100;
+      const speedMultiplier = currentBpmRef.current / baseBpm;
+
+      // Advance song playhead position in score seconds
+      currentTimeRef.current += deltaClock * speedMultiplier;
       const currentPos = currentTimeRef.current;
 
       setCurrentTime(currentPos);
       updateNoteColoringAndDisplay(currentPos);
 
       // Metronome accompaniment
-      const speedRatio = 100 / bpmPercentRef.current;
-      const effectiveBpm = scoreData.bpm * (bpmPercentRef.current / 100);
-      const beatIntervalSec = 60 / effectiveBpm;
-
-      if (metronomeOn) {
-        const currentBeat = Math.floor(currentPos / beatIntervalSec);
+      if (metronomeOnRef.current) {
+        const beatIntervalScore = 60 / baseBpm;
+        const currentBeat = Math.floor(currentPos / beatIntervalScore);
         if (currentBeat > lastBeatClickedRef.current && currentBeat >= 0) {
           lastBeatClickedRef.current = currentBeat;
-          pianoEngine.playClick(currentBeat % 4 === 0);
+          const isDownbeat = currentBeat % 4 === 0;
+          pianoEngine.playClick(isDownbeat);
+          setActiveBeat((currentBeat % 4) + 1);
         }
       }
 
-      // Check if finished
-      if (currentPos >= effectiveTotalDuration && effectiveTotalDuration > 0) {
+      // Check if song finished
+      if (currentPos >= scoreData.totalSec && scoreData.totalSec > 0) {
         handleStopFull();
         setStatusMessage('Música finalizada');
         return;
       }
 
-      // LOOKAHEAD WINDOW: Schedule notes due between lastSchedulePos and currentPos + 0.12s
-      const scheduleWindowEnd = currentPos + 0.12;
+      // LOOKAHEAD WINDOW in score time (0.12s of real clock = 0.12 * speedMultiplier score seconds)
+      const lookaheadScoreSec = Math.max(0.08, 0.12 * speedMultiplier);
+      const scheduleWindowEnd = currentPos + lookaheadScoreSec;
       const windowStart = lastSchedulePosRef.current;
 
       scoreData.notes.forEach((note) => {
-        const noteStartScaled = note.startTime * speedRatio;
-
-        if (noteStartScaled >= windowStart && noteStartScaled < scheduleWindowEnd) {
+        if (note.startTime >= windowStart && note.startTime < scheduleWindowEnd) {
           // Check voice filter
           const curSelected = selectedVoiceRef.current;
           const curFocus = voiceFocusModeRef.current;
@@ -467,9 +481,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
           }
 
           if (shouldPlay) {
-            const delaySec = Math.max(0, noteStartScaled - currentPos);
-            const playCtxTime = nowClock + delaySec;
-            const noteDurationScaled = note.duration * speedRatio;
+            const delayRealSec = Math.max(0, (note.startTime - currentPos) / speedMultiplier);
+            const playCtxTime = nowClock + delayRealSec;
+            const noteDurationScaled = Math.max(0.12, note.duration / speedMultiplier);
             const effectivePitch = note.pitch + transpositionRef.current;
             const finalVel = note.volume * volumeMultiplier;
 
@@ -479,7 +493,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               pianoEngine.playNote(effectivePitch, playCtxTime, noteDurationScaled, finalVel);
             }
             if (curSound === 'voice' || curSound === 'both') {
-              voiceEngine.singNote(effectivePitch, note.part, playCtxTime, noteDurationScaled, finalVel * 1.05);
+              voiceEngine.singNote(effectivePitch, note.part, playCtxTime, noteDurationScaled, finalVel * 1.1);
             }
           }
         }
@@ -501,7 +515,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
       pausePlayback();
     } else {
       let startFrom = currentTimeRef.current;
-      if (startFrom >= effectiveTotalDuration - 0.5) {
+      if (startFrom >= scoreData.totalSec - 0.5) {
         startFrom = 0;
       }
       startPlayback(startFrom);
@@ -518,13 +532,12 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
   // User interactive scrub on progress bar
   const handleSeek = (newSec: number) => {
-    const clamped = Math.max(0, Math.min(newSec, effectiveTotalDuration));
+    const clamped = Math.max(0, Math.min(newSec, scoreData.totalSec));
     currentTimeRef.current = clamped;
     lastSchedulePosRef.current = clamped;
     setCurrentTime(clamped);
 
     if (isPlaying) {
-      // Cut currently ringing sounds and re-anchor schedule
       pianoEngine.stopAllNotes();
       voiceEngine.stopAll();
       startPlayback(clamped);
@@ -693,7 +706,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold text-xs transition-all ${
                 soundMode === 'piano'
-                  ? 'bg-blue-600 text-white shadow-sm'
+                  ? 'bg-blue-600 text-white shadow-sm font-bold'
                   : 'text-slate-400 hover:bg-slate-800'
               }`}
             >
@@ -711,12 +724,12 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold text-xs transition-all ${
                 soundMode === 'voice'
-                  ? 'bg-rose-600 text-white shadow-sm'
+                  ? 'bg-rose-600 text-white shadow-sm font-bold ring-1 ring-rose-400'
                   : 'text-slate-400 hover:bg-slate-800'
               }`}
               title="Voz humana cantando as notas em harmonia coral"
             >
-              <Mic className="w-3.5 h-3.5" />
+              <Mic className="w-3.5 h-3.5 text-rose-300" />
               <span>Voz Cantada</span>
             </button>
 
@@ -727,69 +740,171 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               }}
               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-semibold text-xs transition-all ${
                 soundMode === 'both'
-                  ? 'bg-purple-600 text-white shadow-sm'
+                  ? 'bg-purple-600 text-white shadow-sm font-bold ring-1 ring-purple-400'
                   : 'text-slate-400 hover:bg-slate-800'
               }`}
+              title="Piano acompanhando a voz humana cantando as linhas do coral"
             >
-              <Music className="w-3.5 h-3.5" />
-              <span>Piano + Voz</span>
+              <Music className="w-3.5 h-3.5 text-purple-300" />
+              <span>Piano + Voz (Recomendado)</span>
             </button>
           </div>
 
-          {/* Transposition & Speed */}
-          <div className="flex items-center gap-2">
-            {/* Transposition */}
-            <div className="flex items-center gap-1 bg-slate-950/80 px-2 py-1 rounded-xl border border-slate-700/80">
-              <span className="text-slate-400 font-medium text-[11px] flex items-center gap-0.5">
-                <Music2 className="w-3 h-3 text-blue-400" />
-                <span>Tom:</span>
-              </span>
-              <button
-                onClick={() => onTranspositionChange(transposition - 1)}
-                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold text-slate-200"
-              >
-                -1
-              </button>
-              <span className="min-w-6 text-center font-mono font-bold text-blue-400 text-xs">
-                {transposition === 0 ? 'Orig.' : transposition > 0 ? `+${transposition}` : transposition}
-              </span>
-              <button
-                onClick={() => onTranspositionChange(transposition + 1)}
-                className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold text-slate-200"
-              >
-                +1
-              </button>
-            </div>
+          {/* Transposition */}
+          <div className="flex items-center gap-1 bg-slate-950/80 px-2 py-1 rounded-xl border border-slate-700/80">
+            <span className="text-slate-400 font-medium text-[11px] flex items-center gap-0.5">
+              <Music2 className="w-3 h-3 text-blue-400" />
+              <span>Tom:</span>
+            </span>
+            <button
+              onClick={() => onTranspositionChange(transposition - 1)}
+              className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold text-slate-200"
+              title="Diminuir tom em 1 semitom"
+            >
+              -1
+            </button>
+            <span className="min-w-6 text-center font-mono font-bold text-blue-400 text-xs">
+              {transposition === 0 ? 'Orig.' : transposition > 0 ? `+${transposition}` : transposition}
+            </span>
+            <button
+              onClick={() => onTranspositionChange(transposition + 1)}
+              className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 font-bold text-slate-200"
+              title="Aumentar tom em 1 semitom"
+            >
+              +1
+            </button>
+          </div>
+        </div>
 
-            {/* Metronome */}
+        {/* ROW 1.5: DEDICATED METRONOME & SPEED / TEMPO CONTROLS */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-xl bg-slate-950/90 border border-slate-800 shadow-sm text-xs">
+          {/* Metronome toggle and visual beat indicator */}
+          <div className="flex items-center gap-2">
             <button
               onClick={() => {
                 pianoEngine.resume();
                 setMetronomeOn(!metronomeOn);
               }}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-xl border text-xs font-semibold transition-all ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-all cursor-pointer ${
                 metronomeOn
-                  ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold animate-pulse'
-                  : 'bg-slate-950/80 text-slate-300 border-slate-700/80 hover:bg-slate-800'
+                  ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md ring-2 ring-amber-400/50'
+                  : 'bg-slate-800/90 text-slate-300 border-slate-700 hover:bg-slate-700'
               }`}
+              title="Ligar ou desligar som do metrônomo"
             >
-              <Clock className="w-3.5 h-3.5" />
-              <span>Metrônomo</span>
+              <Clock className="w-4 h-4" />
+              <span>{metronomeOn ? 'Metrônomo Ligado' : 'Ligar Metrônomo'}</span>
             </button>
 
-            {/* Speed slider */}
-            <div className="flex items-center gap-1.5 bg-slate-950/80 px-2.5 py-1 rounded-xl border border-slate-700/80">
-              <Sliders className="w-3 h-3 text-slate-400" />
+            {/* Visual Beat Pulsers (1 2 3 4) */}
+            <div className="flex items-center gap-1 pl-1">
+              {[1, 2, 3, 4].map((beatNum) => {
+                const isActive = metronomeOn && isPlaying && activeBeat === beatNum;
+                const isDownbeat = beatNum === 1;
+                return (
+                  <span
+                    key={beatNum}
+                    className={`w-5 h-5 rounded-md flex items-center justify-center font-mono text-[10px] font-bold transition-all ${
+                      isActive
+                        ? isDownbeat
+                          ? 'bg-amber-400 text-slate-950 scale-110 shadow-lg shadow-amber-400/50 ring-2 ring-amber-300'
+                          : 'bg-emerald-400 text-slate-950 scale-105 shadow-md shadow-emerald-400/50'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700/60'
+                    }`}
+                  >
+                    {beatNum}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Current BPM Display & Tempo Term */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-slate-400 font-bold text-[11px]">Velocidade:</span>
+              <span className="font-mono text-base font-extrabold text-emerald-400">
+                {currentBpm} <span className="text-xs font-semibold text-slate-400">BPM</span>
+              </span>
+            </div>
+            <span className="hidden sm:inline-block px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700/60 text-[10px] text-slate-300 font-medium">
+              {currentBpm < 60
+                ? 'Largo (Muito lento)'
+                : currentBpm <= 75
+                ? 'Adagio (Aprendizado)'
+                : currentBpm <= 95
+                ? 'Andante (Ensaio)'
+                : currentBpm <= 115
+                ? 'Moderato (Padrão)'
+                : currentBpm <= 135
+                ? 'Allegro (Animado)'
+                : 'Presto (Rápido)'}
+            </span>
+          </div>
+
+          {/* Steppers & Speed Presets */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {/* -5 BPM button */}
+            <button
+              onClick={() => setCurrentBpm((prev) => Math.max(40, prev - 5))}
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700 active:scale-95 transition-all"
+              title="Diminuir velocidade em 5 BPM"
+            >
+              -5
+            </button>
+
+            {/* Presets: 60, 80, 100, 120 BPM */}
+            {[
+              { bpm: 60, label: '60 (Lento)' },
+              { bpm: 80, label: '80 (Ensaio)' },
+              { bpm: 100, label: '100 (Padrão)' },
+              { bpm: 120, label: '120 (Alegro)' },
+            ].map((preset) => (
+              <button
+                key={preset.bpm}
+                onClick={() => setCurrentBpm(preset.bpm)}
+                className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                  currentBpm === preset.bpm
+                    ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+
+            {/* +5 BPM button */}
+            <button
+              onClick={() => setCurrentBpm((prev) => Math.min(180, prev + 5))}
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700 active:scale-95 transition-all"
+              title="Aumentar velocidade em 5 BPM"
+            >
+              +5
+            </button>
+
+            {/* Reset to Score Original BPM */}
+            {scoreData.bpm && currentBpm !== scoreData.bpm && (
+              <button
+                onClick={() => setCurrentBpm(scoreData.bpm)}
+                className="px-2 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-blue-400 text-[11px] font-semibold border border-blue-500/30 transition-all"
+                title={`Restaurar velocidade original do hino (${scoreData.bpm} BPM)`}
+              >
+                Orig. ({scoreData.bpm})
+              </button>
+            )}
+
+            {/* Continuous BPM Slider */}
+            <div className="flex items-center gap-1.5 pl-1.5 border-l border-slate-800">
               <input
                 type="range"
-                min="50"
-                max="150"
-                step="5"
-                value={bpmPercent}
-                onChange={(e) => setBpmPercent(Number(e.target.value))}
-                className="w-16 accent-emerald-500 cursor-pointer"
+                min="40"
+                max="180"
+                step="1"
+                value={currentBpm}
+                onChange={(e) => setCurrentBpm(Number(e.target.value))}
+                className="w-20 accent-emerald-500 cursor-pointer"
+                title={`Ajuste contínuo de velocidade: ${currentBpm} BPM`}
               />
-              <span className="font-mono text-emerald-400 text-[11px] min-w-8">{bpmPercent}%</span>
             </div>
           </div>
         </div>
@@ -890,7 +1005,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
               <input
                 type="range"
                 min="0"
-                max={effectiveTotalDuration || 100}
+                max={totalDuration || 100}
                 step="0.1"
                 value={currentTime}
                 onChange={(e) => handleSeek(Number(e.target.value))}
@@ -899,7 +1014,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
             </div>
 
             <span className="font-mono text-xs text-slate-400 min-w-11">
-              {formatTime(effectiveTotalDuration)}
+              {formatTime(totalDuration)}
             </span>
           </div>
 

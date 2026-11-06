@@ -9,11 +9,15 @@ export type VocalPart = 'soprano' | 'contralto' | 'tenor' | 'baixo';
 export class VoiceAudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
-  private activeVoices: { osc: OscillatorNode; lfo: OscillatorNode; gains: GainNode[] }[] = [];
-  private volume: number = 0.9;
+  private activeVoices: {
+    oscillators: (OscillatorNode | AudioNode)[];
+    gains: GainNode[];
+    timers: number[];
+  }[] = [];
+  private volume: number = 0.95;
   private isMuted: boolean = false;
 
-  private initContext(): AudioContext {
+  public initContext(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       this.ctx = new AudioCtx();
@@ -32,24 +36,68 @@ export class VoiceAudioEngine {
   }
 
   /**
-   * Returns formant center frequencies based on voice category
+   * Returns formant frequencies and vocal resonance parameters for each choral voice
    */
-  private getFormants(part: VocalPart) {
+  private getVocalProfile(part: VocalPart) {
     switch (part) {
       case 'soprano':
-        return { f1: 850, f2: 1300, f3: 2850, q1: 5.0, q2: 7.0, q3: 9.0 };
+        return {
+          f1: 820,
+          f2: 1350,
+          f3: 2950,
+          q1: 4.8,
+          q2: 6.5,
+          q3: 8.5,
+          vibratoRate: 5.4,
+          vibratoDepth: 0.014,
+          sawGain: 0.65,
+          triangleGain: 0.45,
+        };
       case 'contralto':
-        return { f1: 650, f2: 1100, f3: 2500, q1: 5.5, q2: 7.5, q3: 9.0 };
+        return {
+          f1: 620,
+          f2: 1100,
+          f3: 2550,
+          q1: 5.2,
+          q2: 7.0,
+          q3: 8.8,
+          vibratoRate: 5.0,
+          vibratoDepth: 0.013,
+          sawGain: 0.7,
+          triangleGain: 0.4,
+        };
       case 'tenor':
-        return { f1: 580, f2: 1050, f3: 2400, q1: 6.0, q2: 8.0, q3: 9.5 };
+        return {
+          f1: 540,
+          f2: 1040,
+          f3: 2420,
+          q1: 5.5,
+          q2: 7.5,
+          q3: 9.0,
+          vibratoRate: 5.2,
+          vibratoDepth: 0.012,
+          sawGain: 0.72,
+          triangleGain: 0.38,
+        };
       case 'baixo':
       default:
-        return { f1: 450, f2: 880, f3: 2200, q1: 6.5, q2: 8.5, q3: 10.0 };
+        return {
+          f1: 380,
+          f2: 820,
+          f3: 2200,
+          q1: 6.0,
+          q2: 8.0,
+          q3: 9.5,
+          vibratoRate: 4.8,
+          vibratoDepth: 0.011,
+          sawGain: 0.75,
+          triangleGain: 0.45,
+        };
     }
   }
 
   /**
-   * Sings a note with human vocal tract resonances and natural vibrato
+   * Sings a note simulating human vocal tract resonances, vowel shaping and choir vibrato
    */
   public singNote(
     midiPitch: number,
@@ -64,90 +112,124 @@ export class VoiceAudioEngine {
 
       const now = startTime !== undefined && startTime >= ctx.currentTime ? startTime : ctx.currentTime;
       const freq = this.midiToFreq(midiPitch);
-      const formants = this.getFormants(part);
+      const profile = this.getVocalProfile(part);
 
-      // Glottal source: sawtooth with rich harmonics
-      const glottalOsc = ctx.createOscillator();
-      glottalOsc.type = 'sawtooth';
-      glottalOsc.frequency.setValueAtTime(freq, now);
+      // Glottal cords primary oscillator (sawtooth for rich harmonic spectrum)
+      const glottalSaw = ctx.createOscillator();
+      glottalSaw.type = 'sawtooth';
+      glottalSaw.frequency.setValueAtTime(freq, now);
 
-      // Natural human vocal vibrato (LFO ~5.2 Hz)
+      // Glottal cords body oscillator (triangle for vocal warmth and chest weight)
+      const glottalTri = ctx.createOscillator();
+      glottalTri.type = 'triangle';
+      glottalTri.frequency.setValueAtTime(freq, now);
+
+      // Natural vocal vibrato (singer lfo with progressive onset)
       const vibratoLfo = ctx.createOscillator();
       const vibratoGain = ctx.createGain();
-      vibratoLfo.frequency.setValueAtTime(5.2, now);
-      // Delayed vibrato onset (singers add vibrato after hitting pitch)
+      vibratoLfo.frequency.setValueAtTime(profile.vibratoRate, now);
+      // Delayed vibrato onset (human singers initiate straight tone then bloom vibrato)
       vibratoGain.gain.setValueAtTime(0, now);
-      vibratoGain.gain.linearRampToValueAtTime(freq * 0.015, now + 0.12); // ~1.5% pitch variation
+      vibratoGain.gain.linearRampToValueAtTime(freq * profile.vibratoDepth, now + 0.12);
       vibratoLfo.connect(vibratoGain);
-      vibratoGain.connect(glottalOsc.frequency);
+      vibratoGain.connect(glottalSaw.frequency);
+      vibratoGain.connect(glottalTri.frequency);
 
-      // Main vocal envelope (smooth attack, sustained singing, gentle breath release)
-      const vocalGain = ctx.createGain();
-      const peakVolume = Math.min(0.95, velocity * 0.9);
+      // Mix oscillators
+      const sawMix = ctx.createGain();
+      sawMix.gain.value = profile.sawGain;
+      glottalSaw.connect(sawMix);
 
-      // Soft human breath onset (30ms)
-      vocalGain.gain.setValueAtTime(0.0001, now);
-      vocalGain.gain.linearRampToValueAtTime(peakVolume, now + 0.035);
+      const triMix = ctx.createGain();
+      triMix.gain.value = profile.triangleGain;
+      glottalTri.connect(triMix);
 
-      // Sustain
-      const sustainEnd = now + Math.max(0.1, duration - 0.05);
-      vocalGain.gain.setValueAtTime(peakVolume, sustainEnd);
+      const sourceMix = ctx.createGain();
+      sawMix.connect(sourceMix);
+      triMix.connect(sourceMix);
 
-      // Vocal release
-      const noteEnd = now + duration;
-      vocalGain.gain.exponentialRampToValueAtTime(0.0001, noteEnd + 0.08);
-
-      // Three parallel formant bandpass filters (F1, F2, F3)
+      // Formant filters simulating open choral vowel ('A' / 'Ah' / 'Ó')
       const bp1 = ctx.createBiquadFilter();
       bp1.type = 'bandpass';
-      bp1.frequency.setValueAtTime(formants.f1, now);
-      bp1.Q.setValueAtTime(formants.q1, now);
+      bp1.frequency.setValueAtTime(profile.f1, now);
+      bp1.Q.setValueAtTime(profile.q1, now);
 
       const bp2 = ctx.createBiquadFilter();
       bp2.type = 'bandpass';
-      bp2.frequency.setValueAtTime(formants.f2, now);
-      bp2.Q.setValueAtTime(formants.q2, now);
+      bp2.frequency.setValueAtTime(profile.f2, now);
+      bp2.Q.setValueAtTime(profile.q2, now);
 
       const bp3 = ctx.createBiquadFilter();
       bp3.type = 'bandpass';
-      bp3.frequency.setValueAtTime(formants.f3, now);
-      bp3.Q.setValueAtTime(formants.q3, now);
+      bp3.frequency.setValueAtTime(profile.f3, now);
+      bp3.Q.setValueAtTime(profile.q3, now);
 
       const g1 = ctx.createGain();
       g1.gain.value = 1.0;
       const g2 = ctx.createGain();
-      g2.gain.value = 0.6;
+      g2.gain.value = 0.65;
       const g3 = ctx.createGain();
-      g3.gain.value = 0.35;
+      g3.gain.value = 0.4;
 
-      glottalOsc.connect(bp1);
-      glottalOsc.connect(bp2);
-      glottalOsc.connect(bp3);
+      sourceMix.connect(bp1);
+      sourceMix.connect(bp2);
+      sourceMix.connect(bp3);
 
       bp1.connect(g1);
       bp2.connect(g2);
       bp3.connect(g3);
 
-      g1.connect(vocalGain);
-      g2.connect(vocalGain);
-      g3.connect(vocalGain);
+      // Formant combiner
+      const formantSum = ctx.createGain();
+      g1.connect(formantSum);
+      g2.connect(formantSum);
+      g3.connect(formantSum);
 
+      // Articulation envelope (human vocal onset, sustain, and release)
+      const vocalGain = ctx.createGain();
+      const peakVolume = Math.min(1.0, velocity * 1.15);
+
+      // Soft natural vocal breath onset (35ms attack)
+      vocalGain.gain.setValueAtTime(0.0001, now);
+      vocalGain.gain.linearRampToValueAtTime(peakVolume, now + 0.04);
+
+      // Sustain body
+      const sustainEnd = now + Math.max(0.08, duration - 0.06);
+      vocalGain.gain.setValueAtTime(peakVolume, sustainEnd);
+
+      // Natural vocal decay
+      const noteEnd = now + duration;
+      vocalGain.gain.exponentialRampToValueAtTime(0.0001, noteEnd + 0.07);
+
+      formantSum.connect(vocalGain);
       vocalGain.connect(this.masterGain);
 
-      glottalOsc.start(now);
+      // Start all sound sources
+      glottalSaw.start(now);
+      glottalTri.start(now);
       vibratoLfo.start(now);
 
-      const stopTime = noteEnd + 0.1;
-      glottalOsc.stop(stopTime);
+      const stopTime = noteEnd + 0.09;
+      glottalSaw.stop(stopTime);
+      glottalTri.stop(stopTime);
       vibratoLfo.stop(stopTime);
 
-      const voice = { osc: glottalOsc, lfo: vibratoLfo, gains: [vocalGain, g1, g2, g3] };
-      this.activeVoices.push(voice);
+      const voiceEntry = {
+        oscillators: [glottalSaw, glottalTri, vibratoLfo],
+        gains: [vocalGain, formantSum, g1, g2, g3, sourceMix, sawMix, triMix, vibratoGain],
+        timers: [] as number[],
+      };
 
-      setTimeout(() => {
-        const idx = this.activeVoices.indexOf(voice);
-        if (idx !== -1) this.activeVoices.splice(idx, 1);
-      }, duration * 1000 + 200);
+      this.activeVoices.push(voiceEntry);
+
+      const cleanupTimer = window.setTimeout(() => {
+        const idx = this.activeVoices.indexOf(voiceEntry);
+        if (idx !== -1) {
+          this.activeVoices.splice(idx, 1);
+        }
+      }, (stopTime - ctx.currentTime) * 1000 + 100);
+
+      voiceEntry.timers.push(cleanupTimer);
     } catch (err) {
       console.warn('Voice sing error:', err);
     }
@@ -158,20 +240,23 @@ export class VoiceAudioEngine {
       const now = this.ctx ? this.ctx.currentTime : 0;
       this.activeVoices.forEach((v) => {
         try {
+          v.timers.forEach(t => clearTimeout(t));
           v.gains.forEach((g) => {
             g.gain.cancelScheduledValues(now);
             g.gain.setValueAtTime(0.0001, now);
             g.disconnect();
           });
-          v.osc.stop(now + 0.01);
-          v.lfo.stop(now + 0.01);
-          v.osc.disconnect();
-          v.lfo.disconnect();
+          v.oscillators.forEach((osc) => {
+            try {
+              (osc as OscillatorNode).stop(now + 0.005);
+              osc.disconnect();
+            } catch {}
+          });
         } catch {}
       });
       this.activeVoices = [];
     } catch (e) {
-      console.warn('stopAll error', e);
+      console.warn('stopAll error in VoiceAudioEngine:', e);
     }
   }
 

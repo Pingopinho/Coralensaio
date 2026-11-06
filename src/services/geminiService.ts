@@ -29,7 +29,9 @@ export async function convertSheetMusicToAbc(
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => null);
-    const errorMsg = errorData?.error || `Erro HTTP ${response.status} (${response.statusText})`;
+    const errorMsg =
+      errorData?.error ||
+      `Erro ao processar partitura no servidor (${response.status}: ${response.statusText || 'Não encontrado'})`;
     throw new Error(errorMsg);
   }
 

@@ -77,33 +77,36 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Sheet music conversion endpoint (Supports Photos & PDFs)
+// Sheet music conversion endpoint (Supports Photos & Multi-page PDFs)
 app.post('/api/convert-sheet', async (req, res) => {
   try {
     const { imageBase64, title } = req.body;
 
     if (!imageBase64) {
-      return res.status(400).json({ error: 'Nenhum arquivo ou imagem foi fornecido.' });
+      return res.status(400).json({ error: 'Nenhum arquivo ou imagem de partitura foi fornecido.' });
     }
 
     if (!process.env.GEMINI_API_KEY) {
       return res.status(500).json({
-        error: 'Chave GEMINI_API_KEY não configurada no servidor. Verifique o painel Settings > Secrets.',
+        error: 'Chave GEMINI_API_KEY não configurada no servidor. Configure a chave no painel Secrets.',
       });
     }
 
-    // Extract mime type and raw base64 data
+    // Extract mime type and clean base64 data
     let mimeType = 'image/jpeg';
     let base64Data = imageBase64;
 
     if (imageBase64.includes(';base64,')) {
       const parts = imageBase64.split(';base64,');
-      mimeType = parts[0].replace('data:', '') || 'image/jpeg';
+      mimeType = parts[0].replace('data:', '').trim() || 'image/jpeg';
       base64Data = parts[1];
-    } else if (imageBase64.startsWith('JVBERi0')) {
+    } else if (imageBase64.trim().startsWith('JVBERi0')) {
       // PDF magic bytes in base64
       mimeType = 'application/pdf';
     }
+
+    // Strip all whitespaces and newlines that can break base64 decoding
+    base64Data = base64Data.trim().replace(/\s+/g, '');
 
     const documentPart = {
       inlineData: {
@@ -112,8 +115,12 @@ app.post('/api/convert-sheet', async (req, res) => {
       },
     };
 
+    const promptText = title
+      ? `${GEMINI_PROMPT}\nO título deste hino ou partitura é "${title}".`
+      : GEMINI_PROMPT;
+
     const textPart = {
-      text: GEMINI_PROMPT,
+      text: promptText,
     };
 
     // Active Gemini models for vision and PDF document transcription
@@ -127,6 +134,7 @@ app.post('/api/convert-sheet', async (req, res) => {
 
     for (const model of modelsToTry) {
       try {
+        console.log(`Tentando transcrever partitura (${mimeType}) com modelo: ${model}...`);
         const response = await ai.models.generateContent({
           model: model,
           contents: {
@@ -136,17 +144,28 @@ app.post('/api/convert-sheet', async (req, res) => {
 
         generatedText = response.text || '';
         if (generatedText.trim()) {
+          console.log(`Transcrição musical com ${model} concluída com sucesso!`);
           break;
         }
       } catch (err: any) {
         lastError = err;
-        console.warn(`Model ${model} failed, trying next fallback if available:`, err?.message || err);
+        console.warn(`Modelo ${model} falhou, tentando fallback se disponível:`, err?.message || err);
       }
     }
 
     if (!generatedText.trim()) {
-      const msg = lastError?.message || 'O modelo não conseguiu extrair a notação musical deste arquivo.';
-      return res.status(502).json({ error: msg });
+      let friendlyMsg = 'Não foi possível ler as notas musicais deste arquivo PDF ou imagem.';
+      if (lastError?.message) {
+        try {
+          const parsed = JSON.parse(lastError.message);
+          if (parsed?.error?.message) {
+            friendlyMsg = `Erro na API do Gemini: ${parsed.error.message}`;
+          }
+        } catch {
+          friendlyMsg = `Erro na leitura: ${lastError.message}`;
+        }
+      }
+      return res.status(500).json({ error: friendlyMsg });
     }
 
     const cleanAbc = sanitizeAbc(generatedText, title);
